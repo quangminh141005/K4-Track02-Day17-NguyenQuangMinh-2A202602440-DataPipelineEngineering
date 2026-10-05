@@ -1,61 +1,168 @@
 # K4-Track02-Day17 — Report cá nhân
 
-Phần phân tích tối đa một trang, không tính output ở phần 5.
-Định dạng tham chiếu và phạm vi tính trang: [SUBMISSION.md](../docs/SUBMISSION.md).
-
-**Họ tên / MSSV:**
-**Repo:**
-**Commit bài nộp:**
-**AI đã dùng và phạm vi hỗ trợ (hoặc không dùng):**
-**Nguồn tham khảo khác (nếu có):**
+**Họ tên / MSSV:** Nguyễn Quang Minh / 2A202602440 (theo tên repo)
+**Repo:** https://github.com/quangminh141005/K4-Track02-Day17-NguyenQuangMinh-2A202602440-DataPipelineEngineering
+**Commit bài nộp:** Chưa commit; điền SHA của commit cuối khi nộp.
+**AI đã dùng và phạm vi hỗ trợ:** OpenAI Codex: đọc repo, xác định và sửa ba lỗi, chạy kiểm tra, hỗ trợ soạn báo cáo. Học viên cần review và giải thích từng thay đổi trước khi nộp.
+**Nguồn tham khảo khác:** README, RULES, RUBRIC, CHECKPOINTS và mã nguồn của đề bài; không dùng nguồn bên ngoài.
 
 ## 1. Ba lỗi
 
-Mỗi lỗi 4 dòng. Triệu chứng = thứ bạn *thấy* đầu tiên (check nào fail, số nào lạ,
-checksum nào lệch) — không phải cách sửa.
-
 | | Lỗi Silver | Lỗi late data | Lỗi xoá (CDC) |
 |---|---|---|---|
-| **Triệu chứng** | | | |
-| **Nguyên nhân gốc** | | | |
-| **Cách sửa** (file, vài dòng) | | | |
-| **Khái niệm trên slide** | | | |
+| **Triệu chứng** | Baseline: 24 hàng cho 12 ticket; T-91 có ba trạng thái; chunks bị trùng. | Feature checksum khác full recompute; u05 thiếu event ngày 08-12; lookback 0 < P99 3. | T-97 chưa thành tombstone, còn trong snapshot mới nhất và có 2 chunks. |
+| **Nguyên nhân gốc** | Dedup chỉ trong batch, sau đó INSERT; không kiểm tra LSN giữa các batch. | Chỉ tính lại ngày ingest, bỏ qua partition event time của dữ liệu đến muộn. | Staging lấy ID chỉ từ after; delete có after=null nên bị lọc bỏ. |
+| **Cách sửa** | silver.py: MERGE theo ticket_id; chỉ UPDATE khi LSN mới lớn hơn; INSERT key chưa có. | config.py: LOOKBACK_DAYS=3 theo ceil(P99) đo từ Bronze. | staging.py: coalesce ID từ after, key, before; dữ liệu cá nhân vẫn lấy từ after nên null khi xoá. |
+| **Khái niệm trên slide** | Silver keyed, dedup, idempotent MERGE, newest state wins. | Event time, late arrivals, lookback, overwrite-partition. | CDC delete khác Kafka tombstone; xoá phải lan xuống Gold. |
 
 ## 2. Các con số
 
-- P99 lateness đo từ Bronze: `____` ngày → `LOOKBACK_DAYS = ____`
-- `submission/checksums.txt`: PASS / FAIL — Gold checksum: `________________`
-- `make parity`: PARITY / MISMATCH
+- Baseline: verify 8/18; pytest 9 fail, 25 pass (log trong evidence/baseline-*.txt).
+- Bronze: 43 records có event_time; P50=0.00, P95=2.90, P99=3.00, max=3 ngày → LOOKBACK_DAYS=3.
+- Sau sửa: verify 18/18; pytest 34 pass; rerun PASS, C0=C1=C2=C3.
+- Gold checksum: `39e115c510ecdf526800eac227158a4f`; dbt build thành công; parity PARITY.
 
-## 3. Lựa chọn công cụ / kỹ thuật (mỗi dòng một câu "vì sao")
+## 3. Lựa chọn công cụ / kỹ thuật
 
-- MERGE theo khoá cho `silver_tickets`, overwrite-partition cho `gold_feature_daily`:
-- Tombstone thay vì xoá hẳn hàng trong Silver:
-- Snapshot training dựng lại từ Bronze "as of" ngày đó, không sửa snapshot cũ:
-- DuckDB (lite) / dbt (track dbt) cho bài toán cỡ này, chứ không phải Spark:
+- MERGE giữ một trạng thái theo key và LSN; overwrite-partition tính lại aggregate theo ngày, không cộng trùng khi replay.
+- Tombstone giữ key/LSN để batch cũ không hồi sinh ticket; đánh đổi là giữ metadata của hàng đã xoá.
+- Snapshot dựng từ Bronze as-of và feedback đã đến trước ngày đó để tái lập dữ liệu, tránh rò rỉ tương lai; feedback muộn tạo phiên bản mới.
+- DuckDB phù hợp seed nhỏ, chạy local không cần hạ tầng Spark; dbt cung cấp model SQL, contract, test và microbatch để đối chiếu hai bảng chung.
 
 ## 4. Hai câu hỏi suy ngẫm
 
-1. Snapshot `v2026-08-12`..`v2026-08-14` vẫn chứa văn bản của T-97 (đã bị xoá ngày
-   08-15). "Snapshot bất biến" và "quyền được xoá dữ liệu" mâu thuẫn — bạn xử lý thế nào?
-2. Regex che được email và số điện thoại, nhưng tên "Nguyễn Văn An" vẫn còn. Bạn sẽ
-   đặt chốt PII nào, ở tầng nào, và đo nó ra sao?
+1. Trong production, quyền xoá phải được áp dụng cả cho snapshot cũ, Bronze, transcript, cache, export và backup theo chính sách lưu giữ. Dùng deletion registry và lineage để chặn truy cập ngay, xoá hoặc tạo phiên bản đã làm sạch, thu hồi bản cũ và ghi audit; xem xét huấn luyện lại model liên quan. Bài lab giữ snapshot cũ để minh hoạ tính bất biến, chưa triển khai quy trình erasure đầy đủ.
+2. Đặt chốt PII ở Bronze→Silver trước mọi text đi Gold: regex kết hợp NER hỗ trợ tiếng Việt, pseudonymization nhất quán và quarantine mẫu chưa chắc chắn; kiểm tra lại trước export/training/RAG. Đo precision/recall theo loại PII trên tập gán nhãn, ưu tiên recall, theo dõi false negative và review mẫu; Bronze phải hạn chế quyền truy cập và có retention.
 
-## 5. Output (dán nguyên văn)
+## 5. Output thực tế
+
+Các lệnh dùng `make VENV=/home/qminh/miniconda3/envs/env_vinai_lab <target>` để chạy bằng conda env được yêu cầu. Baseline được chạy bằng .venv trước khi sửa. Không làm bonus; extensions không chấm điểm.
 
 ```text
-$ make verify
+$ make VENV=/home/qminh/miniconda3/envs/env_vinai_lab verify
+=== verify.py — Day 17 pipeline contracts ===
+  [OK ] Bronze  every daily batch landed as Parquet (7 days x 3 sources)
+  [OK ] Bronze  re-landing a batch is a no-op (append-only, no duplicate file)
+  [OK ] Bronze  Bronze keeps the raw truth: Kafka tombstone + redelivered events are still there
+  [OK ] Silver  silver_tickets has exactly one row per ticket_id
+  [OK ] Silver  T-91 shows its latest state: high / closed / bug
+  [OK ] Silver  deleted ticket T-97 is a tombstone: is_deleted and no personal data left
+  [OK ] Silver  no email / phone number survives past Bronze
+  [OK ] Silver  silver_events has one row per event_id (Kafka redeliveries removed)
+  [OK ] Silver  2 malformed events quarantined with a reason; the run did not halt
+  [OK ] Gold    gold_feature_daily reconciles with a full recompute from Silver
+  [OK ] Gold    u05's offline events of 08-12 (arrived 08-15) are counted on 08-12
+  [OK ] Gold    LOOKBACK_DAYS covers measured P99 lateness (p99=3.00 days)
+  [OK ] Gold    training set uses point-in-time priority (T-91 created as 'low')
+  [OK ] Gold    late feedback creates a NEW snapshot version; the old one is untouched
+  [OK ] Gold    latest training snapshot excludes the deleted ticket T-97
+  [OK ] Gold    deletes propagate to the RAG index: no chunk of T-97
+  [OK ] Gold    gold_doc_chunks: one row per chunk, and a re-run embeds 0 new chunks
+  [OK ] Rerun   re-run 2026-08-12 three times -> Gold checksum identical to a fresh build
 
-$ make test
-
-$ make rerun3
-
-$ make lateness
-
-$ make dbt
-
-$ make parity
+RESULT: 18/18 checks — ALL PASS
+re-run checksums written to submission/checksums.txt
 ```
 
-Nếu dùng PowerShell, ghi lệnh tương đương và output thực tế theo [SUBMISSION.md](../docs/SUBMISSION.md).
-Nếu làm bonus, thêm output B1 hoặc đường dẫn bằng chứng B2 ở cuối phần này.
+```text
+$ make VENV=/home/qminh/miniconda3/envs/env_vinai_lab test
+..................................                                       [100%]
+34 passed in 1.23s
+```
+
+```text
+$ make VENV=/home/qminh/miniconda3/envs/env_vinai_lab rerun3
+# Lab 17 — re-run check for 2026-08-12
+
+run                     gold_feature_daily    gold_training_set     gold_doc_chunks       gold (combined)
+fresh build             8630e04a61d1          9370ca77af23          cb9ebd12fdcc          39e115c510ecdf526800eac227158a4f
+re-run #1 of 2026-08-12 8630e04a61d1          9370ca77af23          cb9ebd12fdcc          39e115c510ecdf526800eac227158a4f
+re-run #2 of 2026-08-12 8630e04a61d1          9370ca77af23          cb9ebd12fdcc          39e115c510ecdf526800eac227158a4f
+re-run #3 of 2026-08-12 8630e04a61d1          9370ca77af23          cb9ebd12fdcc          39e115c510ecdf526800eac227158a4f
+
+RESULT: PASS — 3 re-runs, identical checksums
+```
+
+```text
+$ make VENV=/home/qminh/miniconda3/envs/env_vinai_lab lateness
+event lateness over 43 Bronze records (calendar days): p50=0.00 p95=2.90 p99=3.00 max=3
+-> lookback must be >= ceil(p99) = 3 day(s); config.LOOKBACK_DAYS = 3
+```
+
+```text
+$ make VENV=/home/qminh/miniconda3/envs/env_vinai_lab dbt
+cd dbt_project && DBT_PROFILES_DIR=. /home/qminh/miniconda3/envs/env_vinai_lab/bin/dbt build --event-time-start 2026-08-10 --event-time-end 2026-08-17
+02:23:35  Running with dbt=1.12.5
+02:23:35  Registered adapter: duckdb=1.11.0
+02:23:35  Unable to do partial parsing because saved manifest not found. Starting full parse.
+02:23:36  Found 5 models, 13 data tests, 2 sources, 502 macros, 1 unit test
+02:23:36
+02:23:36  Concurrency: 1 threads (target='dev')
+02:23:36
+02:23:36  1 of 19 START sql view model main.stg_events ................................... [RUN]
+02:23:36  1 of 19 OK created sql view model main.stg_events .............................. [OK in 0.05s]
+02:23:36  2 of 19 START sql view model main.stg_ticket_changes ........................... [RUN]
+02:23:36  2 of 19 OK created sql view model main.stg_ticket_changes ...................... [OK in 0.02s]
+02:23:36  3 of 19 START sql incremental model main.silver_events ......................... [RUN]
+02:23:36  3 of 19 OK created sql incremental model main.silver_events .................... [OK in 0.06s]
+02:23:36  4 of 19 START unit_test silver_tickets::silver_tickets_latest_change_wins_and_delete_is_tombstone  [RUN]
+02:23:36  4 of 19 PASS silver_tickets::silver_tickets_latest_change_wins_and_delete_is_tombstone  [PASS in 0.07s]
+02:23:36  8 of 19 START sql incremental model main.silver_tickets ........................ [RUN]
+02:23:36  8 of 19 OK created sql incremental model main.silver_tickets ................... [OK in 0.07s]
+02:23:36  5 of 19 START test not_null_silver_events_event_id ............................. [RUN]
+02:23:36  5 of 19 PASS not_null_silver_events_event_id ................................... [PASS in 0.02s]
+02:23:36  6 of 19 START test not_null_silver_events_user_id .............................. [RUN]
+02:23:36  6 of 19 PASS not_null_silver_events_user_id .................................... [PASS in 0.01s]
+02:23:36  7 of 19 START test unique_silver_events_event_id ............................... [RUN]
+02:23:36  7 of 19 PASS unique_silver_events_event_id ..................................... [PASS in 0.01s]
+02:23:36  9 of 19 START test accepted_values_silver_tickets_category__bug__billing__other  [RUN]
+02:23:36  9 of 19 PASS accepted_values_silver_tickets_category__bug__billing__other ...... [PASS in 0.01s]
+02:23:36  10 of 19 START test accepted_values_silver_tickets_priority__low__medium__high . [RUN]
+02:23:36  10 of 19 PASS accepted_values_silver_tickets_priority__low__medium__high ....... [PASS in 0.01s]
+02:23:36  11 of 19 START test accepted_values_silver_tickets_status__open__pending__closed  [RUN]
+02:23:36  11 of 19 PASS accepted_values_silver_tickets_status__open__pending__closed ..... [PASS in 0.01s]
+02:23:36  12 of 19 START test not_null_silver_tickets__lsn ............................... [RUN]
+02:23:36  12 of 19 PASS not_null_silver_tickets__lsn ..................................... [PASS in 0.01s]
+02:23:36  13 of 19 START test not_null_silver_tickets_is_deleted ......................... [RUN]
+02:23:36  13 of 19 PASS not_null_silver_tickets_is_deleted ............................... [PASS in 0.01s]
+02:23:36  14 of 19 START test not_null_silver_tickets_ticket_id .......................... [RUN]
+02:23:36  14 of 19 PASS not_null_silver_tickets_ticket_id ................................ [PASS in 0.01s]
+02:23:36  15 of 19 START test unique_silver_tickets_ticket_id ............................ [RUN]
+02:23:36  15 of 19 PASS unique_silver_tickets_ticket_id .................................. [PASS in 0.01s]
+02:23:36  16 of 19 START sql microbatch model main.gold_feature_daily .................... [RUN]
+02:23:36  Batch 1 of 7 START batch 2026-08-10 of main.gold_feature_daily ....................... [RUN]
+02:23:36  Batch 1 of 7 OK created batch 2026-08-10 of main.gold_feature_daily .................. [OK in 0.03s]
+02:23:36  Batch 2 of 7 START batch 2026-08-11 of main.gold_feature_daily ....................... [RUN]
+02:23:36  Batch 2 of 7 OK created batch 2026-08-11 of main.gold_feature_daily .................. [OK in 0.03s]
+02:23:36  Batch 3 of 7 START batch 2026-08-12 of main.gold_feature_daily ....................... [RUN]
+02:23:36  Batch 3 of 7 OK created batch 2026-08-12 of main.gold_feature_daily .................. [OK in 0.02s]
+02:23:37  Batch 4 of 7 START batch 2026-08-13 of main.gold_feature_daily ....................... [RUN]
+02:23:37  Batch 4 of 7 OK created batch 2026-08-13 of main.gold_feature_daily .................. [OK in 0.02s]
+02:23:37  Batch 5 of 7 START batch 2026-08-14 of main.gold_feature_daily ....................... [RUN]
+02:23:37  Batch 5 of 7 OK created batch 2026-08-14 of main.gold_feature_daily .................. [OK in 0.02s]
+02:23:37  Batch 6 of 7 START batch 2026-08-15 of main.gold_feature_daily ....................... [RUN]
+02:23:37  Batch 6 of 7 OK created batch 2026-08-15 of main.gold_feature_daily .................. [OK in 0.02s]
+02:23:37  Batch 7 of 7 START batch 2026-08-16 of main.gold_feature_daily ....................... [RUN]
+02:23:37  Batch 7 of 7 OK created batch 2026-08-16 of main.gold_feature_daily .................. [OK in 0.02s]
+02:23:37  16 of 19 OK created sql microbatch model main.gold_feature_daily ............... [SUCCESS in 0.19s]
+02:23:37  17 of 19 START test dbt_utils_free_unique_combination_gold_feature_daily_user_id__event_date  [RUN]
+02:23:37  17 of 19 PASS dbt_utils_free_unique_combination_gold_feature_daily_user_id__event_date  [PASS in 0.01s]
+02:23:37  18 of 19 START test not_null_gold_feature_daily_event_date ..................... [RUN]
+02:23:37  18 of 19 PASS not_null_gold_feature_daily_event_date ........................... [PASS in 0.01s]
+02:23:37  19 of 19 START test not_null_gold_feature_daily_user_id ........................ [RUN]
+02:23:37  19 of 19 PASS not_null_gold_feature_daily_user_id .............................. [PASS in 0.01s]
+02:23:37
+02:23:37  Finished running 3 incremental models, 13 data tests, 1 unit test, 2 view models in 0 hours 0 minutes and 0.68 seconds (0.68s).
+02:23:37
+02:23:37  Completed successfully
+02:23:37
+02:23:37  Done. PASS=19 WARN=0 ERROR=0 SKIP=0 NO-OP=0 REUSED=0 TOTAL=19
+```
+
+```text
+$ make VENV=/home/qminh/miniconda3/envs/env_vinai_lab parity
+=== parity: lite pipeline vs dbt ===
+  [OK ] silver_tickets       lite 3c15dfd43701  dbt 3c15dfd43701
+  [OK ] gold_feature_daily   lite 8630e04a61d1  dbt 8630e04a61d1
+RESULT: PARITY — both implementations agree
+```

@@ -90,6 +90,21 @@ Suggested split: 20' read + run · 75' three bugs · 25' dbt · 30' report.
 
 ## Quick start
 
+For an existing Conda environment (for example `env_vinai_lab`), use its
+Python and dbt executables without creating another virtual environment:
+
+```bash
+conda activate env_vinai_lab
+python -m pip install -r requirements.txt -r requirements-dbt.txt
+make VENV="$CONDA_PREFIX" run
+make VENV="$CONDA_PREFIX" verify
+make VENV="$CONDA_PREFIX" test
+make VENV="$CONDA_PREFIX" rerun3
+make VENV="$CONDA_PREFIX" lateness
+make VENV="$CONDA_PREFIX" dbt
+make VENV="$CONDA_PREFIX" parity
+```
+
 ```bash
 make setup        # create .venv + install requirements.txt
 make run          # fresh build: reset Silver/Gold, backfill 08-10 .. 08-16 from Bronze
